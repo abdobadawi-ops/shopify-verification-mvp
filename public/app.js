@@ -3,25 +3,19 @@
 ========================================== */
 
 let orders = [];
-
 let currentOrder = null;
-
 let currentTab = "needs-verification";
-
 let searchTerm = "";
 
-const READY_ORDERS_STORAGE_KEY = "readyToFulfillOrders";
+const VERIFICATION_API_BASE = "/api/verification";
 
 /* ==========================================
    DOM Elements
 ========================================== */
 
 const ordersScreen = document.getElementById("orders-screen");
-
 const verificationScreen = document.getElementById("verification-screen");
-
 const ordersList = document.getElementById("orders-list");
-
 const ordersCount = document.getElementById("orders-count");
 
 const productsList = document.getElementById("products-list");
@@ -33,17 +27,12 @@ const verificationOrderNumber = document.getElementById(
 const orderStatus = document.getElementById("order-status");
 
 const barcodeInput = document.getElementById("barcode-input");
-
 const scanButton = document.getElementById("scan-button");
-
 const scanMessage = document.getElementById("scan-message");
 
 const manualProduct = document.getElementById("manual-product");
-
 const manualQuantity = document.getElementById("manual-quantity");
-
 const manualButton = document.getElementById("manual-button");
-
 const manualMessage = document.getElementById("manual-message");
 
 const readyMessage = document.getElementById("ready-message");
@@ -62,20 +51,24 @@ const readyToFulfillTab = document.getElementById("ready-to-fulfill-tab");
 
 function getVerifiedQuantity(item) {
   return (
-    (item.barcodeVerifiedQuantity || 0) + (item.manualVerifiedQuantity || 0)
+    (Number(item.barcodeVerifiedQuantity) || 0) +
+    (Number(item.manualVerifiedQuantity) || 0)
   );
 }
 
 function getRemainingQuantity(item) {
-  return Math.max(item.orderedQuantity - getVerifiedQuantity(item), 0);
+  return Math.max(
+    (Number(item.orderedQuantity) || 0) - getVerifiedQuantity(item),
+    0,
+  );
 }
 
 function isItemComplete(item) {
-  return getVerifiedQuantity(item) >= item.orderedQuantity;
+  return getVerifiedQuantity(item) >= (Number(item.orderedQuantity) || 0);
 }
 
 function isOrderComplete(order) {
-  if (!order || !order.items || !order.items.length) {
+  if (!order || !Array.isArray(order.items) || order.items.length === 0) {
     return false;
   }
 
@@ -83,67 +76,362 @@ function isOrderComplete(order) {
 }
 
 /* ==========================================
-   Local Storage
+   Neon Verification API
 ========================================== */
 
-function getSavedReadyOrders() {
-  try {
-    const saved = localStorage.getItem(READY_ORDERS_STORAGE_KEY);
+/*
+  IMPORTANT:
 
-    if (!saved) {
-      return [];
+  Backend routes:
+
+  GET:
+    /api/verification?orderId=:orderId
+
+  POST:
+    /api/verification
+
+  DELETE:
+    /api/verification?orderId=:orderId
+
+  Shopify IDs look like:
+
+    gid://shopify/Order/123456789
+
+  Therefore URLSearchParams / encodeURIComponent
+  is used for the query parameter.
+
+  IMPORTANT:
+  We DO NOT use:
+
+    /api/verification/:orderId
+
+  because the backend does not expose that route.
+*/
+
+/* ==========================================
+   Get Server Verification
+========================================== */
+
+async function getServerVerification(orderId) {
+  if (!orderId) {
+    throw new Error("Order ID is required.");
+  }
+
+  const url = `${VERIFICATION_API_BASE}?orderId=${encodeURIComponent(orderId)}`;
+
+  console.log("==========================================");
+  console.log("GET VERIFICATION");
+  console.log("Order ID:", orderId);
+  console.log("URL:", url);
+  console.log("==========================================");
+
+  const response = await fetch(url, {
+    method: "GET",
+
+    headers: {
+      Accept: "application/json",
+    },
+
+    cache: "no-store",
+  });
+
+  const responseText = await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      `Verification API returned ${response.status}: ${responseText}`,
+    );
+  }
+
+  let result;
+
+  try {
+    result = JSON.parse(responseText);
+  } catch (error) {
+    throw new Error(`Verification API returned invalid JSON: ${responseText}`);
+  }
+
+  console.log("Verification API response:", result);
+
+  if (!result.success) {
+    throw new Error(result.error || "Failed to load verification state.");
+  }
+
+  /*
+    Backend should return:
+
+    {
+      success: true,
+      found: true,
+      verification: {...}
     }
 
-    const parsed = JSON.parse(saved);
+    OR:
 
-    if (!Array.isArray(parsed)) {
-      return [];
+    {
+      success: true,
+      found: false,
+      verification: null
     }
+  */
 
-    return parsed;
-  } catch (error) {
-    console.error("LOCAL STORAGE READ ERROR:", error);
-
-    return [];
-  }
+  return result.verification || null;
 }
 
-function saveReadyOrders(readyOrders) {
-  try {
-    localStorage.setItem(READY_ORDERS_STORAGE_KEY, JSON.stringify(readyOrders));
+/* ==========================================
+   Apply Server Verification State
+========================================== */
 
-    console.log(`Saved ${readyOrders.length} ready orders to localStorage.`);
-  } catch (error) {
-    console.error("LOCAL STORAGE SAVE ERROR:", error);
-  }
-}
-
-function addReadyOrder(order) {
-  if (!order || !order.id) {
-    return;
+function applyServerVerification(order, verification) {
+  if (!order || !Array.isArray(order.items)) {
+    return order;
   }
 
-  const readyOrders = getSavedReadyOrders();
+  /*
+    No Neon record.
 
-  const existingIndex = readyOrders.findIndex(
-    (savedOrder) => savedOrder.id === order.id,
+    Start verification from zero.
+  */
+
+  if (!verification) {
+    order.items.forEach((item) => {
+      item.barcodeVerifiedQuantity = 0;
+      item.manualVerifiedQuantity = 0;
+    });
+
+    return order;
+  }
+
+  /*
+    verification_data normally arrives
+    as an object from PostgreSQL JSONB.
+
+    Support string JSON as well.
+  */
+
+  let verificationData = verification.verification_data;
+
+  if (typeof verificationData === "string") {
+    try {
+      verificationData = JSON.parse(verificationData);
+    } catch (error) {
+      console.error("Could not parse verification_data:", error);
+
+      verificationData = null;
+    }
+  }
+
+  /*
+    Support:
+
+    {
+      items: [...]
+    }
+  */
+
+  const savedItems = Array.isArray(verificationData?.items)
+    ? verificationData.items
+    : [];
+
+  console.log(
+    `Applying ${savedItems.length} saved items from Neon to ${order.orderNumber}`,
   );
 
-  if (existingIndex !== -1) {
-    readyOrders[existingIndex] = order;
-  } else {
-    readyOrders.push(order);
-  }
+  /*
+    Map saved items by Shopify line item ID.
+  */
 
-  saveReadyOrders(readyOrders);
+  const savedItemsMap = new Map();
+
+  savedItems.forEach((savedItem) => {
+    if (!savedItem || !savedItem.id) {
+      return;
+    }
+
+    savedItemsMap.set(String(savedItem.id), savedItem);
+  });
+
+  /*
+    Apply Neon state to Shopify items.
+  */
+
+  order.items.forEach((item) => {
+    const savedItem = savedItemsMap.get(String(item.id));
+
+    if (!savedItem) {
+      item.barcodeVerifiedQuantity = 0;
+      item.manualVerifiedQuantity = 0;
+
+      return;
+    }
+
+    item.barcodeVerifiedQuantity =
+      Number(savedItem.barcodeVerifiedQuantity) || 0;
+
+    item.manualVerifiedQuantity = Number(savedItem.manualVerifiedQuantity) || 0;
+
+    /*
+      Never allow verified quantity
+      to exceed Shopify quantity.
+
+      Remove manual verification first.
+    */
+
+    const orderedQuantity = Number(item.orderedQuantity) || 0;
+
+    const totalVerified = getVerifiedQuantity(item);
+
+    if (totalVerified > orderedQuantity) {
+      const excess = totalVerified - orderedQuantity;
+
+      if (item.manualVerifiedQuantity >= excess) {
+        item.manualVerifiedQuantity -= excess;
+      } else {
+        const remainingExcess = excess - item.manualVerifiedQuantity;
+
+        item.manualVerifiedQuantity = 0;
+
+        item.barcodeVerifiedQuantity = Math.max(
+          item.barcodeVerifiedQuantity - remainingExcess,
+          0,
+        );
+      }
+    }
+  });
+
+  return order;
 }
 
-function removeReadyOrder(orderId) {
-  const readyOrders = getSavedReadyOrders();
+/* ==========================================
+   Save Verification State To Neon
+========================================== */
 
-  const updatedOrders = readyOrders.filter((order) => order.id !== orderId);
+async function saveServerVerification(order) {
+  if (!order || !order.id) {
+    throw new Error("Cannot save verification without an order ID.");
+  }
 
-  saveReadyOrders(updatedOrders);
+  const verificationData = {
+    items: order.items.map((item) => ({
+      id: item.id,
+
+      barcodeVerifiedQuantity: Number(item.barcodeVerifiedQuantity) || 0,
+
+      manualVerifiedQuantity: Number(item.manualVerifiedQuantity) || 0,
+    })),
+  };
+
+  console.log("==========================================");
+  console.log("SAVE VERIFICATION");
+  console.log("Order ID:", order.id);
+  console.log("Order Number:", order.orderNumber);
+  console.log("Verification Data:", verificationData);
+  console.log("==========================================");
+
+  const response = await fetch(VERIFICATION_API_BASE, {
+    method: "POST",
+
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+
+    body: JSON.stringify({
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      verificationData,
+    }),
+  });
+
+  const responseText = await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      `Verification API returned ${response.status}: ${responseText}`,
+    );
+  }
+
+  let result;
+
+  try {
+    result = JSON.parse(responseText);
+  } catch (error) {
+    throw new Error(`Save API returned invalid JSON: ${responseText}`);
+  }
+
+  console.log("SAVE VERIFICATION RESPONSE:", result);
+
+  if (!result.success) {
+    throw new Error(result.error || "Failed to save verification state.");
+  }
+
+  console.log(`Verification state saved to Neon for ${order.orderNumber}.`);
+
+  return result.verification;
+}
+
+/* ==========================================
+   Delete Verification State
+========================================== */
+
+async function deleteServerVerification(orderId) {
+  if (!orderId) {
+    throw new Error("Order ID is required.");
+  }
+
+  /*
+    IMPORTANT:
+
+    Use query parameter.
+
+    Correct:
+      /api/verification?orderId=...
+
+    NOT:
+      /api/verification/...
+  */
+
+  const url = `${VERIFICATION_API_BASE}?orderId=${encodeURIComponent(orderId)}`;
+
+  console.log("==========================================");
+  console.log("DELETE VERIFICATION");
+  console.log("Order ID:", orderId);
+  console.log("URL:", url);
+  console.log("==========================================");
+
+  const response = await fetch(url, {
+    method: "DELETE",
+
+    headers: {
+      Accept: "application/json",
+    },
+
+    cache: "no-store",
+  });
+
+  const responseText = await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      `Verification API returned ${response.status}: ${responseText}`,
+    );
+  }
+
+  let result;
+
+  try {
+    result = JSON.parse(responseText);
+  } catch (error) {
+    throw new Error(`Delete API returned invalid JSON: ${responseText}`);
+  }
+
+  if (!result.success) {
+    throw new Error(result.error || "Failed to delete verification state.");
+  }
+
+  console.log(`Verification state deleted for ${orderId}.`);
+
+  return result;
 }
 
 /* ==========================================
@@ -156,6 +444,8 @@ function convertShopifyOrder(shopifyOrder) {
 
     orderNumber: shopifyOrder.name,
 
+    verificationStatus: "needs-verification",
+
     items: (shopifyOrder.lineItems?.edges || []).map((itemEdge) => {
       const lineItem = itemEdge.node;
 
@@ -166,7 +456,7 @@ function convertShopifyOrder(shopifyOrder) {
 
         barcode: lineItem.variant ? lineItem.variant.barcode : null,
 
-        orderedQuantity: lineItem.quantity,
+        orderedQuantity: Number(lineItem.quantity) || 0,
 
         barcodeVerifiedQuantity: 0,
 
@@ -177,109 +467,81 @@ function convertShopifyOrder(shopifyOrder) {
 }
 
 /* ==========================================
-   Refresh Ready Orders From Shopify
+   Load Verification State For Orders
 ========================================== */
 
-/*
-  Important logic:
+async function loadVerificationStates(shopifyOrders) {
+  const ordersWithVerification = await Promise.all(
+    shopifyOrders.map(async (order) => {
+      try {
+        const verification = await getServerVerification(order.id);
 
-  Shopify is the source of truth for whether
-  the order is still unfulfilled.
+        console.log("------------------------------------------");
 
-  localStorage is only responsible for remembering
-  our local verification progress.
+        console.log("ORDER:", order.orderNumber);
 
-  If a locally saved Ready order is still returned
-  by Shopify -> keep it.
+        console.log("SHOPIFY ORDER ID:", order.id);
 
-  If Shopify no longer returns it -> remove it
-  from localStorage.
-*/
+        console.log("NEON VERIFICATION:", verification);
 
-function mergeShopifyOrdersWithLocalReady(shopifyOrders) {
-  const savedReadyOrders = getSavedReadyOrders();
+        /*
+            Apply database state.
+          */
 
-  const shopifyOrdersMap = new Map();
+        applyServerVerification(order, verification);
 
-  shopifyOrders.forEach((order) => {
-    shopifyOrdersMap.set(order.id, order);
-  });
+        /*
+            Calculate status from
+            actual quantities.
+          */
 
-  const validReadyOrders = [];
+        const complete = isOrderComplete(order);
 
-  /*
-    Check every locally saved Ready order.
-  */
+        order.verificationStatus = complete
+          ? "ready-to-fulfill"
+          : "needs-verification";
 
-  savedReadyOrders.forEach((savedOrder) => {
-    const freshShopifyOrder = shopifyOrdersMap.get(savedOrder.id);
+        console.log("CALCULATED STATUS:", order.verificationStatus);
 
-    /*
-      Shopify no longer considers this order
-      a valid unfulfilled order.
+        console.log(
+          "ITEMS:",
+          order.items.map((item) => ({
+            id: item.id,
+            name: item.name,
+            ordered: item.orderedQuantity,
+            barcodeVerified: item.barcodeVerifiedQuantity,
+            manualVerified: item.manualVerifiedQuantity,
+            totalVerified: getVerifiedQuantity(item),
+          })),
+        );
 
-      This usually means it was fulfilled,
-      cancelled, refunded, returned, etc.
+        console.log("------------------------------------------");
 
-      Therefore remove it from localStorage.
-    */
+        return order;
+      } catch (error) {
+        console.error(
+          `Could not load verification for ${order.orderNumber}:`,
+          error,
+        );
 
-    if (!freshShopifyOrder) {
-      console.log(
-        `Removing ${savedOrder.orderNumber} from localStorage because it is no longer a valid unfulfilled Shopify order.`,
-      );
+        /*
+            If Neon cannot be read,
+            NEVER assume verified.
+          */
 
-      return;
-    }
+        order.items.forEach((item) => {
+          item.barcodeVerifiedQuantity = 0;
+          item.manualVerifiedQuantity = 0;
+        });
 
-    /*
-      The order still exists and is still unfulfilled.
+        order.verificationStatus = "needs-verification";
 
-      Keep the LOCAL verification quantities.
-    */
+        return order;
+      }
+    }),
+  );
 
-    validReadyOrders.push({
-      ...savedOrder,
-
-      orderNumber: freshShopifyOrder.orderNumber,
-    });
-  });
-
-  /*
-    Save cleaned Ready orders.
-  */
-
-  saveReadyOrders(validReadyOrders);
-
-  /*
-    Create a Set of locally Ready orders.
-  */
-
-  const readyIds = new Set(validReadyOrders.map((order) => order.id));
-
-  /*
-    Shopify orders that are NOT already Ready
-    belong in Needs Verification.
-
-    This prevents Ready orders from appearing
-    in Needs Verification.
-  */
-
-  const needsVerificationOrders = shopifyOrders
-    .filter((order) => !readyIds.has(order.id))
-    .map((order) => {
-      return order;
-    });
-
-  /*
-    Return both groups.
-  */
-
-  return {
-    needsVerificationOrders,
-
-    readyOrders: validReadyOrders,
-  };
+  return ordersWithVerification;
 }
 
 /* ==========================================
@@ -293,7 +555,8 @@ async function loadOrders() {
         <h3>Loading orders...</h3>
 
         <p>
-          Getting orders from Shopify.
+          Loading Shopify orders and
+          verification progress from Neon.
         </p>
       </div>
     </div>
@@ -303,73 +566,89 @@ async function loadOrders() {
 
   try {
     /*
-      Read local Ready orders BEFORE Shopify request.
-
-      This is important because localStorage contains
-      our verification progress.
+      Get current Shopify orders.
     */
 
-    const localReadyOrders = getSavedReadyOrders();
+    const response = await fetch("/api/orders", {
+      method: "GET",
 
-    console.log(
-      `Found ${localReadyOrders.length} saved Ready orders in localStorage.`,
-    );
+      headers: {
+        Accept: "application/json",
+      },
 
-    /*
-      Request fresh Shopify data.
-    */
+      cache: "no-store",
+    });
 
-    const response = await fetch("/api/orders");
+    const responseText = await response.text();
 
     if (!response.ok) {
-      throw new Error(`Server returned ${response.status}`);
+      throw new Error(
+        `Orders API returned ${response.status}: ${responseText}`,
+      );
     }
 
-    const result = await response.json();
+    let result;
 
-    console.log("Filtered Shopify orders:", result);
+    try {
+      result = JSON.parse(responseText);
+    } catch (error) {
+      throw new Error(`Orders API returned invalid JSON: ${responseText}`);
+    }
+
+    console.log("SHOPIFY ORDERS RESPONSE:", result);
 
     if (!result.success) {
       throw new Error(result.error || "Failed to load orders.");
     }
 
-    const shopifyOrders = result.orders || [];
+    const shopifyOrders = Array.isArray(result.orders) ? result.orders : [];
+
+    console.log("Shopify orders count:", shopifyOrders.length);
 
     /*
-      Convert Shopify orders.
+      Convert Shopify data.
     */
 
-    const convertedShopifyOrders = shopifyOrders.map(convertShopifyOrder);
+    const convertedOrders = shopifyOrders.map(convertShopifyOrder);
 
     /*
-      Merge Shopify data with local verification state.
+      Load Neon state for EVERY order.
     */
 
-    const merged = mergeShopifyOrdersWithLocalReady(convertedShopifyOrders);
+    const ordersWithVerification =
+      await loadVerificationStates(convertedOrders);
 
     /*
-      Store the two groups together.
+      Replace in-memory state completely.
 
-      Every order has a local status.
+      Nothing is read from localStorage.
     */
 
-    orders = [
-      ...merged.needsVerificationOrders.map((order) => ({
-        ...order,
+    orders = ordersWithVerification;
 
-        verificationStatus: "needs-verification",
-      })),
+    /*
+      Calculate counts.
+    */
 
-      ...merged.readyOrders.map((order) => ({
-        ...order,
+    const needsVerificationCount = orders.filter(
+      (order) => order.verificationStatus === "needs-verification",
+    ).length;
 
-        verificationStatus: "ready-to-fulfill",
-      })),
-    ];
+    const readyCount = orders.filter(
+      (order) => order.verificationStatus === "ready-to-fulfill",
+    ).length;
 
-    console.log(`Needs Verification: ${merged.needsVerificationOrders.length}`);
+    console.log("==========================================");
 
-    console.log(`Ready to Fulfill: ${merged.readyOrders.length}`);
+    console.log("FINAL APPLICATION STATE");
+
+    console.log("Total orders:", orders.length);
+
+    console.log("Needs Verification:", needsVerificationCount);
+
+    console.log("Ready To Fulfill:", readyCount);
+
+    console.log("==========================================");
 
     renderOrders();
   } catch (error) {
@@ -410,20 +689,12 @@ function getCurrentTabOrders() {
     return false;
   });
 
-  /*
-    Search by order number.
-
-    Example:
-    #1054
-    1054
-  */
-
   const normalizedSearch = searchTerm.trim().toLowerCase();
 
   if (normalizedSearch) {
-    filteredOrders = filteredOrders.filter((order) => {
-      return order.orderNumber.toLowerCase().includes(normalizedSearch);
-    });
+    filteredOrders = filteredOrders.filter((order) =>
+      String(order.orderNumber).toLowerCase().includes(normalizedSearch),
+    );
   }
 
   return filteredOrders;
@@ -438,15 +709,7 @@ function renderOrders() {
 
   const visibleOrders = getCurrentTabOrders();
 
-  /*
-    Count only the orders in the active tab.
-  */
-
   ordersCount.textContent = `${visibleOrders.length} orders`;
-
-  /*
-    Empty state.
-  */
 
   if (visibleOrders.length === 0) {
     let title = "No orders";
@@ -489,10 +752,6 @@ function renderOrders() {
 
     return;
   }
-
-  /*
-    Render visible orders.
-  */
 
   visibleOrders.forEach((order) => {
     const totalProducts = order.items.length;
@@ -549,10 +808,6 @@ function switchTab(tab) {
 
   currentTab = tab;
 
-  /*
-    Update active tab UI.
-  */
-
   needsVerificationTab.classList.toggle(
     "active",
     currentTab === "needs-verification",
@@ -563,11 +818,6 @@ function switchTab(tab) {
     currentTab === "ready-to-fulfill",
   );
 
-  /*
-    Render only orders belonging
-    to the selected tab.
-  */
-
   renderOrders();
 }
 
@@ -575,12 +825,14 @@ function switchTab(tab) {
    Open Order
 ========================================== */
 
-function openOrder(orderId) {
-  currentOrder = orders.find((order) => order.id === orderId);
+async function openOrder(orderId) {
+  const selectedOrder = orders.find((order) => order.id === orderId);
 
-  if (!currentOrder) {
+  if (!selectedOrder) {
     return;
   }
+
+  currentOrder = selectedOrder;
 
   ordersScreen.classList.add("hidden");
 
@@ -588,23 +840,52 @@ function openOrder(orderId) {
 
   verificationOrderNumber.textContent = currentOrder.orderNumber;
 
-  renderProducts();
+  scanMessage.textContent = "Loading verification progress...";
 
-  renderManualProducts();
+  try {
+    /*
+      Always retrieve the latest
+      state from Neon.
+    */
 
-  updateOrderStatus();
+    const verification = await getServerVerification(currentOrder.id);
 
-  if (isOrderComplete(currentOrder)) {
-    readyMessage.classList.remove("hidden");
+    applyServerVerification(currentOrder, verification);
 
-    scanMessage.textContent = "Order verification complete.";
-  } else {
-    readyMessage.classList.add("hidden");
+    currentOrder.verificationStatus = isOrderComplete(currentOrder)
+      ? "ready-to-fulfill"
+      : "needs-verification";
 
-    scanMessage.textContent = "Ready to scan.";
+    renderProducts();
+
+    renderManualProducts();
+
+    updateOrderStatus();
+
+    if (isOrderComplete(currentOrder)) {
+      readyMessage.classList.remove("hidden");
+
+      scanMessage.textContent = "Order verification complete.";
+    } else {
+      readyMessage.classList.add("hidden");
+
+      scanMessage.textContent = "Ready to scan.";
+    }
+
+    renderOrders();
+
+    barcodeInput.focus();
+  } catch (error) {
+    console.error("OPEN ORDER ERROR:", error);
+
+    scanMessage.textContent = "Could not load verification progress.";
+
+    renderProducts();
+
+    renderManualProducts();
+
+    updateOrderStatus();
   }
-
-  barcodeInput.focus();
 }
 
 /* ==========================================
@@ -621,31 +902,31 @@ function renderProducts() {
   currentOrder.items.forEach((item) => {
     const verified = getVerifiedQuantity(item);
 
-    const remaining = getRemainingQuantity(item);
-
     const row = document.createElement("div");
 
     row.className = "product-row";
 
     row.innerHTML = `
-      <div>
+        <div>
 
-        <div class="product-name">
-          ${escapeHtml(item.name)}
+          <div class="product-name">
+            ${escapeHtml(item.name)}
+          </div>
+
+          <div class="product-barcode">
+            ${
+              item.barcode
+                ? `Barcode: ${escapeHtml(item.barcode)}`
+                : "No barcode"
+            }
+          </div>
+
         </div>
 
-        <div class="product-barcode">
-          ${
-            item.barcode ? `Barcode: ${escapeHtml(item.barcode)}` : "No barcode"
-          }
+        <div class="product-quantity">
+          ${verified}/${item.orderedQuantity}
         </div>
-
-      </div>
-
-      <div class="product-quantity">
-        ${verified}/${item.orderedQuantity}
-      </div>
-    `;
+      `;
 
     productsList.appendChild(row);
   });
@@ -665,23 +946,6 @@ function renderManualProducts() {
   if (!currentOrder) {
     return;
   }
-
-  /*
-    IMPORTANT:
-
-    Show ALL products that still have
-    remaining quantity.
-
-    Previously this was:
-
-      .filter((item) => !item.barcode ...)
-
-    That meant products with barcodes were
-    completely excluded from the manual selector.
-
-    Now any incomplete product can be manually
-    verified.
-  */
 
   currentOrder.items
     .filter((item) => getRemainingQuantity(item) > 0)
@@ -727,7 +991,11 @@ function scanBarcode(order, barcode) {
     };
   }
 
-  const matchingItems = order.items.filter((item) => item.barcode === barcode);
+  const normalizedBarcode = String(barcode).trim();
+
+  const matchingItems = order.items.filter(
+    (item) => String(item.barcode || "").trim() === normalizedBarcode,
+  );
 
   if (matchingItems.length === 0) {
     return {
@@ -780,7 +1048,8 @@ function scanBarcode(order, barcode) {
     };
   }
 
-  item.barcodeVerifiedQuantity += 1;
+  item.barcodeVerifiedQuantity =
+    (Number(item.barcodeVerifiedQuantity) || 0) + 1;
 
   return {
     success: true,
@@ -791,7 +1060,7 @@ function scanBarcode(order, barcode) {
    Handle Scan
 ========================================== */
 
-function handleScan() {
+async function handleScan() {
   if (!currentOrder) {
     scanMessage.textContent = "No order is currently selected.";
 
@@ -808,8 +1077,22 @@ function handleScan() {
 
   const result = scanBarcode(currentOrder, barcode);
 
-  if (result.success) {
-    scanMessage.textContent = "✓ Product verified successfully.";
+  if (!result.success) {
+    scanMessage.textContent = `✗ ${result.error.message}`;
+
+    barcodeInput.select();
+
+    return;
+  }
+
+  scanMessage.textContent = "Saving verification...";
+
+  try {
+    /*
+      Database save happens first.
+    */
+
+    await saveServerVerification(currentOrder);
 
     barcodeInput.value = "";
 
@@ -819,13 +1102,47 @@ function handleScan() {
 
     updateOrderStatus();
 
-    checkOrderCompletion();
+    scanMessage.textContent = "✓ Product verified and saved.";
+
+    await checkOrderCompletion();
 
     renderOrders();
 
     barcodeInput.focus();
-  } else {
-    scanMessage.textContent = `✗ ${result.error.message}`;
+  } catch (error) {
+    console.error("SCAN SAVE ERROR:", error);
+
+    /*
+      Neon is the source of truth.
+
+      Reload state from Neon.
+    */
+
+    try {
+      const verification = await getServerVerification(currentOrder.id);
+
+      applyServerVerification(currentOrder, verification);
+
+      currentOrder.verificationStatus = isOrderComplete(currentOrder)
+        ? "ready-to-fulfill"
+        : "needs-verification";
+
+      renderProducts();
+
+      renderManualProducts();
+
+      updateOrderStatus();
+
+      renderOrders();
+
+      scanMessage.textContent =
+        "✗ Could not save verification. The order was restored from the server.";
+    } catch (reloadError) {
+      console.error("SCAN ROLLBACK ERROR:", reloadError);
+
+      scanMessage.textContent =
+        "✗ Could not save verification or reload the server state.";
+    }
 
     barcodeInput.select();
   }
@@ -900,7 +1217,8 @@ function manualVerify(order, itemId, quantity) {
     };
   }
 
-  item.manualVerifiedQuantity += quantity;
+  item.manualVerifiedQuantity =
+    (Number(item.manualVerifiedQuantity) || 0) + quantity;
 
   return {
     success: true,
@@ -911,7 +1229,7 @@ function manualVerify(order, itemId, quantity) {
    Handle Manual Verification
 ========================================== */
 
-function handleManualVerification() {
+async function handleManualVerification() {
   if (!currentOrder) {
     manualMessage.textContent = "No order is currently selected.";
 
@@ -930,8 +1248,18 @@ function handleManualVerification() {
 
   const result = manualVerify(currentOrder, itemId, quantity);
 
-  if (result.success) {
-    manualMessage.textContent = "✓ Product verified successfully.";
+  if (!result.success) {
+    manualMessage.textContent = `✗ ${result.error.message}`;
+
+    return;
+  }
+
+  manualMessage.textContent = "Saving verification...";
+
+  try {
+    await saveServerVerification(currentOrder);
+
+    manualMessage.textContent = "✓ Product verified and saved.";
 
     manualQuantity.value = "";
 
@@ -943,11 +1271,37 @@ function handleManualVerification() {
 
     updateOrderStatus();
 
-    checkOrderCompletion();
+    await checkOrderCompletion();
 
     renderOrders();
-  } else {
-    manualMessage.textContent = `✗ ${result.error.message}`;
+  } catch (error) {
+    console.error("MANUAL SAVE ERROR:", error);
+
+    try {
+      const verification = await getServerVerification(currentOrder.id);
+
+      applyServerVerification(currentOrder, verification);
+
+      currentOrder.verificationStatus = isOrderComplete(currentOrder)
+        ? "ready-to-fulfill"
+        : "needs-verification";
+
+      renderProducts();
+
+      renderManualProducts();
+
+      updateOrderStatus();
+
+      renderOrders();
+
+      manualMessage.textContent =
+        "✗ Could not save verification. The order was restored from the server.";
+    } catch (reloadError) {
+      console.error("MANUAL ROLLBACK ERROR:", reloadError);
+
+      manualMessage.textContent =
+        "✗ Could not save verification or reload the server state.";
+    }
   }
 }
 
@@ -979,62 +1333,63 @@ function updateOrderStatus() {
    Check Completion
 ========================================== */
 
-function checkOrderCompletion() {
+async function checkOrderCompletion() {
   if (!currentOrder) {
-    return;
+    return false;
   }
 
   /*
-    Not complete yet.
+    Not complete.
   */
 
   if (!isOrderComplete(currentOrder)) {
+    currentOrder.verificationStatus = "needs-verification";
+
     readyMessage.classList.add("hidden");
 
-    return;
+    return false;
   }
 
   /*
-    Order is now completely verified.
-
-    Change its state to Ready.
+    Complete.
   */
 
   currentOrder.verificationStatus = "ready-to-fulfill";
 
   /*
-    Save it immediately.
+    Persist the complete state.
 
-    This is the important part that makes
-    Ready survive refresh/browser close.
+    NOTE:
+    saveServerVerification() already
+    persists all item quantities.
   */
 
-  addReadyOrder(currentOrder);
+  try {
+    await saveServerVerification(currentOrder);
+  } catch (error) {
+    console.error("FINAL VERIFICATION SAVE ERROR:", error);
 
-  /*
-    Remove it from Needs Verification
-    immediately.
-  */
+    currentOrder.verificationStatus = "needs-verification";
+
+    readyMessage.classList.add("hidden");
+
+    scanMessage.textContent =
+      "✗ Order is complete, but the final state could not be saved.";
+
+    return false;
+  }
 
   readyMessage.classList.remove("hidden");
 
   scanMessage.textContent = "Order verification complete.";
 
-  /*
-    Render the active tab.
-
-    If we are currently on Needs Verification,
-    the order disappears immediately.
-
-    If we are on Ready to Fulfill,
-    it appears there.
-  */
-
   renderOrders();
+
+  return true;
 }
 
 /* ==========================================
-   Back to Orders
+   Back To Orders
 ========================================== */
 
 function goBackToOrders() {
@@ -1060,10 +1415,14 @@ function goBackToOrders() {
 }
 
 /* ==========================================
-   Refresh Shopify Orders
+   Refresh Orders
 ========================================== */
 
 async function refreshOrders() {
+  /*
+    Completely reload Shopify + Neon.
+  */
+
   await loadOrders();
 }
 
@@ -1098,37 +1457,51 @@ function escapeHtml(value) {
    Event Listeners
 ========================================== */
 
-scanButton.addEventListener("click", handleScan);
+if (scanButton) {
+  scanButton.addEventListener("click", handleScan);
+}
 
-barcodeInput.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") {
-    event.preventDefault();
+if (barcodeInput) {
+  barcodeInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
 
-    handleScan();
-  }
-});
+      handleScan();
+    }
+  });
+}
 
-manualButton.addEventListener("click", handleManualVerification);
+if (manualButton) {
+  manualButton.addEventListener("click", handleManualVerification);
+}
 
-backButton.addEventListener("click", goBackToOrders);
+if (backButton) {
+  backButton.addEventListener("click", goBackToOrders);
+}
 
-/*
-  Tabs
-*/
+/* ==========================================
+   Tabs
+========================================== */
 
-needsVerificationTab.addEventListener("click", () => {
-  switchTab("needs-verification");
-});
+if (needsVerificationTab) {
+  needsVerificationTab.addEventListener("click", () => {
+    switchTab("needs-verification");
+  });
+}
 
-readyToFulfillTab.addEventListener("click", () => {
-  switchTab("ready-to-fulfill");
-});
+if (readyToFulfillTab) {
+  readyToFulfillTab.addEventListener("click", () => {
+    switchTab("ready-to-fulfill");
+  });
+}
 
-/*
-  Search
-*/
+/* ==========================================
+   Search
+========================================== */
 
-orderSearch.addEventListener("input", handleOrderSearch);
+if (orderSearch) {
+  orderSearch.addEventListener("input", handleOrderSearch);
+}
 
 /* ==========================================
    Start Application
@@ -1141,8 +1514,12 @@ orderSearch.addEventListener("input", handleOrderSearch);
 switchTab("needs-verification");
 
 /*
-  Load fresh Shopify data and merge it
-  with local Ready orders.
+  Load fresh data.
+
+  Shopify -> current orders
+  Neon    -> verification state
+
+  No localStorage.
 */
 
 loadOrders();
