@@ -6,10 +6,23 @@ dotenv.config();
 
 const app = express();
 
-const PORT = process.env.PORT || 3000;
+// ==========================================
+// Express Configuration
+// ==========================================
 
-// Serve frontend files
-app.use(express.static(path.join(__dirname)));
+app.use(express.json());
+
+// ==========================================
+// Serve Frontend
+// ==========================================
+
+const frontendPath = path.join(__dirname, "..");
+
+app.use(express.static(frontendPath));
+
+app.get("/", (req, res) => {
+  res.sendFile(path.join(frontendPath, "index.html"));
+});
 
 // ==========================================
 // Shopify Configuration
@@ -20,11 +33,6 @@ const CLIENT_ID = process.env.SHOPIFY_CLIENT_ID;
 const CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET;
 
 const SHOPIFY_API_VERSION = "2026-07";
-
-if (!SHOP || !CLIENT_ID || !CLIENT_SECRET) {
-  console.error("Missing Shopify environment variables.");
-  process.exit(1);
-}
 
 // ==========================================
 // Shopify Access Token
@@ -37,6 +45,10 @@ async function getShopifyAccessToken() {
   // Reuse existing token if still valid
   if (accessToken && Date.now() < tokenExpiresAt - 60_000) {
     return accessToken;
+  }
+
+  if (!SHOP || !CLIENT_ID || !CLIENT_SECRET) {
+    throw new Error("Missing Shopify environment variables.");
   }
 
   console.log("Requesting new Shopify access token...");
@@ -300,9 +312,7 @@ app.get("/api/orders", async (req, res) => {
 
     res.json({
       success: true,
-
       count: validOrders.length,
-
       orders: validOrders,
     });
   } catch (error) {
@@ -310,18 +320,19 @@ app.get("/api/orders", async (req, res) => {
 
     res.status(500).json({
       success: false,
-
       error: error.message,
-
       stack: error.stack,
     });
   }
 });
 
 // ==========================================
-// Start Server
+// Vercel Serverless Export
 // ==========================================
+//
+// IMPORTANT:
+// Do NOT use app.listen() here.
+//
+// Vercel starts the function for us.
 
-app.listen(PORT, () => {
-  console.log(`Server running at http://localhost:${PORT}`);
-});
+module.exports = app;
