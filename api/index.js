@@ -9,15 +9,13 @@ const app = express();
 app.use(express.json());
 
 // ==========================================
-// Frontend
+// Serve Frontend Files
 // ==========================================
 
-const frontendPath = path.join(__dirname, "..", "public");
-
-app.use(express.static(frontendPath));
+app.use(express.static(path.join(__dirname, "..")));
 
 app.get("/", (req, res) => {
-  res.sendFile(path.join(frontendPath, "index.html"));
+  res.sendFile(path.join(__dirname, "..", "index.html"));
 });
 
 // ==========================================
@@ -30,6 +28,10 @@ const CLIENT_SECRET = process.env.SHOPIFY_CLIENT_SECRET;
 
 const SHOPIFY_API_VERSION = "2026-07";
 
+if (!SHOP || !CLIENT_ID || !CLIENT_SECRET) {
+  console.error("Missing Shopify environment variables.");
+}
+
 // ==========================================
 // Shopify Access Token
 // ==========================================
@@ -38,12 +40,13 @@ let accessToken = null;
 let tokenExpiresAt = 0;
 
 async function getShopifyAccessToken() {
+  // Reuse existing token if it is still valid.
+  //
+  // The 60-second buffer prevents us from using a token
+  // that is about to expire.
+
   if (accessToken && Date.now() < tokenExpiresAt - 60_000) {
     return accessToken;
-  }
-
-  if (!SHOP || !CLIENT_ID || !CLIENT_SECRET) {
-    throw new Error("Missing Shopify environment variables.");
   }
 
   console.log("Requesting new Shopify access token...");
@@ -226,6 +229,7 @@ app.get("/api/orders", async (req, res) => {
 
       const ordersData = data.orders;
 
+      // Add this page's orders.
       allOrders.push(...ordersData.edges.map((edge) => edge.node));
 
       hasNextPage = ordersData.pageInfo.hasNextPage;
@@ -244,6 +248,10 @@ app.get("/api/orders", async (req, res) => {
     // ==========================================
 
     const validOrders = allOrders.filter((order) => {
+      // ------------------------------------------
+      // 1. Cancelled Orders
+      // ------------------------------------------
+
       if (order.cancelledAt) {
         console.log(
           `Excluded ${order.name}: cancelled at ${order.cancelledAt}`,
@@ -251,6 +259,10 @@ app.get("/api/orders", async (req, res) => {
 
         return false;
       }
+
+      // ------------------------------------------
+      // 2. Refunded / Voided Orders
+      // ------------------------------------------
 
       if (
         order.displayFinancialStatus === "REFUNDED" ||
@@ -263,6 +275,10 @@ app.get("/api/orders", async (req, res) => {
         return false;
       }
 
+      // ------------------------------------------
+      // 3. Returned Orders
+      // ------------------------------------------
+
       if (order.returnStatus === "RETURNED") {
         console.log(
           `Excluded ${order.name}: return status ${order.returnStatus}`,
@@ -270,6 +286,10 @@ app.get("/api/orders", async (req, res) => {
 
         return false;
       }
+
+      // ------------------------------------------
+      // 4. Only Keep Truly Unfulfilled Orders
+      // ------------------------------------------
 
       if (order.displayFulfillmentStatus !== "UNFULFILLED") {
         console.log(
@@ -283,6 +303,10 @@ app.get("/api/orders", async (req, res) => {
     });
 
     console.log(`Valid orders after filtering: ${validOrders.length}`);
+
+    // ==========================================
+    // Return Clean Response
+    // ==========================================
 
     res.json({
       success: true,
@@ -301,7 +325,12 @@ app.get("/api/orders", async (req, res) => {
 });
 
 // ==========================================
-// Vercel Serverless Export
+// Vercel Export
 // ==========================================
+//
+// Vercel runs this Express application as a
+// serverless function.
+//
+// DO NOT use app.listen() here.
 
 module.exports = app;
