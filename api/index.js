@@ -6,17 +6,13 @@ dotenv.config();
 
 const app = express();
 
-// ==========================================
-// Express Configuration
-// ==========================================
-
 app.use(express.json());
 
 // ==========================================
-// Serve Frontend
+// Frontend
 // ==========================================
 
-const frontendPath = path.join(__dirname, "..");
+const frontendPath = path.join(__dirname, "..", "public");
 
 app.use(express.static(frontendPath));
 
@@ -42,7 +38,6 @@ let accessToken = null;
 let tokenExpiresAt = 0;
 
 async function getShopifyAccessToken() {
-  // Reuse existing token if still valid
   if (accessToken && Date.now() < tokenExpiresAt - 60_000) {
     return accessToken;
   }
@@ -231,7 +226,6 @@ app.get("/api/orders", async (req, res) => {
 
       const ordersData = data.orders;
 
-      // Add this page's orders
       allOrders.push(...ordersData.edges.map((edge) => edge.node));
 
       hasNextPage = ordersData.pageInfo.hasNextPage;
@@ -250,10 +244,6 @@ app.get("/api/orders", async (req, res) => {
     // ==========================================
 
     const validOrders = allOrders.filter((order) => {
-      // ------------------------------------------
-      // 1. Cancelled Orders
-      // ------------------------------------------
-
       if (order.cancelledAt) {
         console.log(
           `Excluded ${order.name}: cancelled at ${order.cancelledAt}`,
@@ -261,10 +251,6 @@ app.get("/api/orders", async (req, res) => {
 
         return false;
       }
-
-      // ------------------------------------------
-      // 2. Refunded / Voided Orders
-      // ------------------------------------------
 
       if (
         order.displayFinancialStatus === "REFUNDED" ||
@@ -277,10 +263,6 @@ app.get("/api/orders", async (req, res) => {
         return false;
       }
 
-      // ------------------------------------------
-      // 3. Returned Orders
-      // ------------------------------------------
-
       if (order.returnStatus === "RETURNED") {
         console.log(
           `Excluded ${order.name}: return status ${order.returnStatus}`,
@@ -288,10 +270,6 @@ app.get("/api/orders", async (req, res) => {
 
         return false;
       }
-
-      // ------------------------------------------
-      // 4. Only Keep Truly Unfulfilled Orders
-      // ------------------------------------------
 
       if (order.displayFulfillmentStatus !== "UNFULFILLED") {
         console.log(
@@ -305,10 +283,6 @@ app.get("/api/orders", async (req, res) => {
     });
 
     console.log(`Valid orders after filtering: ${validOrders.length}`);
-
-    // ==========================================
-    // Return Clean Response
-    // ==========================================
 
     res.json({
       success: true,
@@ -329,10 +303,5 @@ app.get("/api/orders", async (req, res) => {
 // ==========================================
 // Vercel Serverless Export
 // ==========================================
-//
-// IMPORTANT:
-// Do NOT use app.listen() here.
-//
-// Vercel starts the function for us.
 
 module.exports = app;
