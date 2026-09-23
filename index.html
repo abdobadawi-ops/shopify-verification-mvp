@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <title>Order Verification</title>
+
+    <link rel="stylesheet" href="style.css" />
+  </head>
+
+  <body>
+    <header class="app-header">
+      <div>
+        <h1>Order Verification</h1>
+        <p>Verify your orders before fulfillment</p>
+      </div>
+    </header>
+
+    <main class="app-container">
+      <!-- =========================
+           Orders Screen
+      ========================== -->
+
+      <section id="orders-screen">
+        <div class="section-header">
+          <div>
+            <h2>Orders</h2>
+
+            <p>Verify orders before fulfillment.</p>
+          </div>
+
+          <span id="orders-count" class="orders-count"> 0 orders </span>
+        </div>
+
+        <!-- Search -->
+
+        <div class="orders-toolbar">
+          <input
+            id="order-search"
+            class="order-search"
+            type="text"
+            placeholder="Search by order number..."
+            autocomplete="off"
+          />
+        </div>
+
+        <!-- Tabs -->
+
+        <div class="order-tabs">
+          <button id="needs-verification-tab" class="order-tab active">
+            Needs Verification
+          </button>
+
+          <button id="ready-to-fulfill-tab" class="order-tab">
+            Ready to Fulfill
+          </button>
+        </div>
+
+        <!-- Orders List -->
+
+        <div id="orders-list" class="orders-list">
+          <!-- Orders will be added by JavaScript -->
+        </div>
+      </section>
+
+      <!-- =========================
+           Verification Screen
+      ========================== -->
+
+      <section id="verification-screen" class="hidden">
+        <button id="back-button" class="back-button">← Back to Orders</button>
+
+        <div class="order-header">
+          <div>
+            <p class="order-label">Order</p>
+
+            <h2 id="verification-order-number">#1001</h2>
+          </div>
+
+          <div id="order-status" class="order-status">Not Complete</div>
+        </div>
+
+        <!-- Products -->
+
+        <div class="products-section">
+          <h3>Products</h3>
+
+          <div id="products-list" class="products-list">
+            <!-- Products -->
+          </div>
+        </div>
+
+        <!-- Scanner -->
+
+        <div class="scanner-section">
+          <h3>Scan Product</h3>
+
+          <p class="scanner-description">
+            Scan the product barcode or enter it manually.
+          </p>
+
+          <div class="scanner-input-container">
+            <input
+              id="barcode-input"
+              type="text"
+              placeholder="Scan barcode..."
+              autocomplete="off"
+            />
+
+            <button id="scan-button">Scan</button>
+          </div>
+
+          <div id="scan-message" class="scan-message">Ready to scan.</div>
+        </div>
+
+        <!-- Manual Verification -->
+
+        <div class="manual-section">
+          <h3>Manual Verification</h3>
+
+          <p class="scanner-description">
+            Use this when a product does not have a barcode.
+          </p>
+
+          <div class="manual-input-container">
+            <select id="manual-product">
+              <option value="">Select product</option>
+            </select>
+
+            <input
+              id="manual-quantity"
+              type="number"
+              min="1"
+              placeholder="Quantity"
+            />
+
+            <button id="manual-button">Verify</button>
+          </div>
+
+          <div id="manual-message" class="scan-message">Ready.</div>
+        </div>
+
+        <!-- Ready to Fulfill -->
+
+        <div id="ready-message" class="ready-message hidden">
+          <div class="ready-icon">✓</div>
+
+          <div>
+            <h3>Order Ready to Fulfill</h3>
+
+            <p>All products in this order have been verified.</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
